@@ -1,3 +1,8 @@
+model/
+runs/
+thai-license-plate-2/
+License-Plate-Recognition-11/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
