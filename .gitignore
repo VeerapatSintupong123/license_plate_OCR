@@ -3,6 +3,7 @@ runs/
 thai-license-plate-2/
 License-Plate-Recognition-11/
 LPR-plate-1/
+province_eval_merged.csv
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
