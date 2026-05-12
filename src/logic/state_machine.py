@@ -8,22 +8,35 @@ class State:
     COMPLETED = "COMPLETED"
 
 class StateMachine:
-    def __init__(self, stationary_threshold=10, illegal_threshold=60):
+    def __init__(
+        self,
+        stationary_threshold  = 10,
+        illegal_threshold     = 60,
+        entry_confirm_frames  = 3,
+        exit_confirm_frames   = 5,
+        cooldown_duration     = 5,
+    ):
         """
         :param stationary_threshold: Seconds of no-motion before triggering AI.
         :param illegal_threshold: Seconds in zone before flagging as illegal dumping.
         """
-        self.state = State.IDLE
+
         self.stationary_threshold = stationary_threshold
         self.illegal_threshold = illegal_threshold
-        
-        # Timing trackers
+        self.entry_confirm_frames = entry_confirm_frames
+        self.exit_confirm_frames = exit_confirm_frames
+        self.cooldown_duration = cooldown_duration
+      
+        self.state = State.IDLE
         self.entry_time = None
         self.stationary_start_time = None
         self.last_motion_time = None
-        
-        # Event flags
         self.ai_triggered = False
+
+        self._consecutive_detections = 0   # fix 2
+        self._consecutive_absences   = 0   # fix 3
+        self._cooldown_start         = None  # fix 4
+
 
     def process_motion(self, detected: bool):
         """
@@ -33,18 +46,24 @@ class StateMachine:
         current_time = time.time()
 
         # STATE: IDLE -> TRACKING
-        if self.state == State.IDLE and detected:
-            self.state = State.TRACKING
-            self.entry_time = current_time
-            self.last_motion_time = current_time
-            logging.info("State: Tracking - Vehicle entered ROI.")
-            return "ENTRY"
+        if self.state == State.IDLE:
+            if detected:
+                self._consecutive_detections += 1
+                if self._consecutive_detections >= self.entry_confirm_frames:
+                    self.state = State.TRACKING
+                    self.entry_time = current_time
+                    self.last_motion_time = current_time
+                    self._consecutive_detections = 0
+                    logging.info("State: TRACKING - Vehicle entered ROI.")
+                    return "ENTRY"
+            else:
+                self._consecutive_detections = 0
 
         # STATE: TRACKING -> STATIONARY
         elif self.state == State.TRACKING:
             if detected:
                 self.last_motion_time = current_time
-            else:
+            elif self.last_motion_time is not None: 
                 # If motion stops, check how long it's been still
                 still_duration = current_time - self.last_motion_time
                 if still_duration >= self.stationary_threshold:
@@ -52,24 +71,28 @@ class StateMachine:
                     self.stationary_start_time = current_time
                     logging.info(f"State: Stationary - Vehicle stopped for {self.stationary_threshold}s.")
                     return "STATIONARY_TRIGGER"
+            else:
+                self.last_motion_time = current_time
 
         # STATE: STATIONARY -> COMPLETED (Vehicle Leaves)
         elif self.state == State.STATIONARY:
             if detected:
-                # If motion starts again after being stationary, they are likely leaving
-                # Or they moved the car to a different spot in the zone.
                 self.last_motion_time = current_time
-            
-            # Check if they have vanished from the ROI for a few seconds
-            if not detected and (current_time - self.last_motion_time > 3):
-                self.state = State.COMPLETED
-                logging.info("State: Completed - Vehicle left ROI.")
-                return "EXIT"
+                self._consecutive_absences = 0
+            else:
+                self._consecutive_absences += 1
+                if self._consecutive_absences >= self.exit_confirm_frames:
+                    self.state = State.COMPLETED
+                    logging.info("State: COMPLETED - Vehicle left ROI.")
+                    return "EXIT"
 
         # STATE: COMPLETED -> IDLE (Reset)
         elif self.state == State.COMPLETED:
-            self.reset()
-            return "RESET"
+            if self._cooldown_start is None:
+                self._cooldown_start = current_time
+            if current_time - self._cooldown_start >= self.cooldown_duration:
+                self.reset()
+                return "RESET"
 
         return self.state
 
@@ -78,8 +101,7 @@ class StateMachine:
         if self.entry_time is None:
             return False
         
-        total_duration = time.time() - self.entry_time
-        return total_duration >= self.illegal_threshold
+        return (time.time() - self.entry_time) >= self.illegal_threshold
 
     def reset(self):
         self.state = State.IDLE
@@ -87,3 +109,7 @@ class StateMachine:
         self.stationary_start_time = None
         self.last_motion_time = None
         self.ai_triggered = False
+        self._consecutive_detections = 0
+        self._consecutive_absences = 0
+        self._cooldown_start = None
+        logging.info("State: IDLE - Reset complete.")

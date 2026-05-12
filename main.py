@@ -1,74 +1,81 @@
 import time
 import logging
+import yaml
 from src.ingestion.stream_handler import StreamHandler
-from src.logic.state_machine import StateMachine
+from src.logic.state_machine import StateMachine, State
 from src.inference.plate_detector import PlateDetector
 from src.processing.perspective_warp import PerspectiveWarp
 from src.ocr.paddle_reader import PaddleReader
 from src.reporting.notifier import Notifier
 from src.reporting.database import Database
 
+def load_config(path: str = r'config/settings.yaml') -> dict:
+    with open(path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
 def main():
-    # 1. Initialize all components
-    # These usually load configurations from a YAML or .env file
-    stream = StreamHandler() 
-    state_manager = StateMachine(idle_threshold=10) # 10 seconds stationary
-    detector = PlateDetector()   # Loads YOLOv11
-    warper = PerspectiveWarp()   # Geometry logic
-    ocr_engine = PaddleReader()  # PaddleOCR with Thai support
+    config = load_config(r'config/settings.yaml')
+    stream = StreamHandler(config)
+    state_manager = StateMachine(
+        stationary_threshold=config.get("stationary_threshold", 10),
+        illegal_threshold=config.get("illegal_threshold", 60),
+    )
+    detector = PlateDetector()
+    warper = PerspectiveWarp()
+    ocr_engine = PaddleReader()
     db = Database()
     notifier = Notifier()
 
-    logging.info("System Initialized. Monitoring restricted zone...")
+    # Remember OCR result across frames so EXIT can use it
+    last_plate_text  = ""
+    last_province    = ""
+    last_best_frame  = None
+
+    logging.info("System initialized. Monitoring restricted zone...")
+    status = None
 
     try:
         while True:
-            # STEP 1: Idle Monitoring (Low Resource)
-            # Pulls a low-res frame from the substream
             frame_sub = stream.get_substream()
-            
-            if stream.has_motion(frame_sub):
-                # STEP 2: State Management
-                # Transition from 'Idle' to 'Active'
-                status = state_manager.process_motion(detected=True)
+            freeze    = status in ("ENTRY", "TRACKING", "STATIONARY_TRIGGER", "STATIONARY")
+            detected  = stream.has_motion(frame_sub, freeze_bg=freeze)
+            status    = state_manager.process_motion(detected=detected)
 
-                if status == "STATIONARY_TRIGGER":
-                    logging.info("Vehicle detected as stationary. Starting AI Pipeline...")
+            # ── Transition: vehicle just became stationary ──────────────────
+            if status == "STATIONARY_TRIGGER":
+                logging.info("Vehicle stationary — starting AI pipeline...")
 
-                    # STEP 3: High-Res Capture (The Burst)
-                    # Grabs high-quality frames for better OCR accuracy
-                    burst = stream.get_highres_burst(n_frames=10)
+                burst = stream.get_highres_burst(n_frames=10)
+                best_frame, plate_bbox = detector.find_best_plate(burst)
 
-                    # STEP 4: Detection & Selection
-                    # Run YOLO and find the frame where the plate is clearest
-                    best_frame, plate_bbox = detector.find_best_plate(burst)
+                # ── False positive: no vehicle plate found ──────────────────────────
+                if best_frame is None:
+                    logging.info("No plate detected — likely false positive. Resetting.")
+                    state_manager.reset()
+                    continue
 
-                    if best_frame is not None:
-                        # STEP 5: Perspective Warp
-                        # Flatten the plate before sending to OCR
-                        aligned_plate = warper.straighten(best_frame, plate_bbox)
+                if best_frame is not None:
+                    aligned_plate = warper.straighten(best_frame, plate_bbox)
+                    last_plate_text, last_province = ocr_engine.extract_text(aligned_plate)
+                    last_best_frame = best_frame
+                    logging.info(f"Identity: {last_plate_text} ({last_province})")
+                    db.save_event(last_plate_text, last_province, best_frame)
 
-                        # STEP 6: OCR
-                        # Extract the text and province
-                        plate_text, province = ocr_engine.extract_text(aligned_plate)
-                        logging.info(f"Identity Found: {plate_text} ({province})")
+            # ── Transition: vehicle just left the zone ──────────────────────
+            elif status == "EXIT":
+                if state_manager.is_illegal_event() and last_plate_text:
+                    logging.warning(f"Illegal event confirmed: {last_plate_text}")
+                    notifier.send_evidence(last_plate_text, last_province, last_best_frame)
 
-                        # STEP 7: Logging & Reporting
-                        db.save_event(plate_text, province, best_frame)
-                        
-                        # Conditional: If the vehicle eventually leaves after staying long enough
-                        if state_manager.is_illegal_event():
-                            notifier.send_evidence(plate_text, province, best_frame)
+                # Clear cached OCR result for the next vehicle
+                last_plate_text = ""
+                last_province   = ""
+                last_best_frame = None
 
-            else:
-                # No motion; reset timers if the vehicle has left the zone
-                state_manager.process_motion(detected=False)
-
-            # Control the loop frequency to prevent CPU spikes
             time.sleep(0.1)
 
     except KeyboardInterrupt:
-        logging.info("Shutting down watchdog...")
+        logging.info("Shutting down...")
     finally:
         stream.release()
 

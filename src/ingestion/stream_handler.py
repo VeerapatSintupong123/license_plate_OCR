@@ -34,32 +34,40 @@ class StreamHandler:
             return None
         return frame
 
-    def has_motion(self, frame):
+    def has_motion(self, frame, freeze_bg=False):
         """
-        Determines if there is a vehicle-sized object inside the ROI.
+        Returns True if meaningful motion is detected inside the ROI.
+        
+        :param frame:     raw BGR frame from camera
+        :param freeze_bg: if True, stop updating the background model
+                          (prevents parked vehicle from being absorbed into background)
         """
         if frame is None:
             return False
             
-        # 1. Mask the ROI: Only look at the restricted zone
+        # 1. Build the ROI mask (used AFTER subtraction, not before)
         mask = np.zeros(frame.shape[:2], dtype=np.uint8)
         cv2.fillPoly(mask, [self.roi_points], 255)
-        roi_area = cv2.bitwise_and(frame, frame, mask=mask)
         
-        # 2. Apply Background Subtraction to the ROI
-        fgmask = self.fgbg.apply(roi_area)
+        # 2. Apply MOG2 to the FULL frame so the background model stays clean
+        #    freeze_bg=True → learningRate=0 (model frozen, parked vehicle stays visible)
+        #    freeze_bg=False → learningRate=-1 (MOG2 auto-adjusts)
+        learning_rate = 0 if freeze_bg else -1
+        fgmask = self.fgbg.apply(frame, learningRate=learning_rate)
         
-        # 3. Clean up the noise (removes wind in trees, small birds, etc.)
+        # 3. NOW restrict to ROI only
+        fgmask = cv2.bitwise_and(fgmask, fgmask, mask=mask)
+        
+        # 4. Clean up noise (wind, small birds, compression artifacts)
         fgmask = cv2.morphologyEx(fgmask, cv2.MORPH_OPEN, self.kernel)
         
-        # 4. Calculate if the 'blob' is big enough to be a car
-        motion_pixel_count = np.count_nonzero(fgmask)
-        roi_pixel_count = np.count_nonzero(mask)
+        # 5. Count only confirmed foreground pixels (255)
+        #    Shadows are marked 127 by MOG2 — exclude them
+        motion_pixel_count = np.count_nonzero(fgmask == 255)
+        roi_pixel_count    = np.count_nonzero(mask)
         
         motion_percentage = (motion_pixel_count / roi_pixel_count) * 100
-        
-        # If > 3% of the restricted zone changed, something is there
-        return motion_percentage > 3.0
+        return motion_percentage > 20.0
 
     def get_highres_burst(self, n_frames=10):
         """
