@@ -1,6 +1,6 @@
 import numpy as np
 from paddleocr import PaddleOCR
-from utils import normalize_text, clean_top, clean_bottom
+from src.ocr.utils import normalize_text, clean_top, clean_bottom
 
 class PaddleReader:
     """

@@ -1,4 +1,4 @@
 rtsp_sub: "rtsp://admin:admin@"
 rtsp_main: "rtsp://admin:admin@"
 roi_points: [[0, 0], [0, 0], [0, 0], [0, 0]]
-idle_threshold: 10
+illegal_threshold: 10

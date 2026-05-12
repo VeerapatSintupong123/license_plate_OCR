@@ -31,7 +31,7 @@ class PlateDetector:
     def __init__(
         self,
         model_name: str = 'license-plate-finetune-v1n.pt',
-        model_dir: str = 'model',
+        model_dir: str = 'models',
         device: str = 'cuda',
         conf_threshold: float = 0.25,
     ):
@@ -89,7 +89,7 @@ class PlateDetector:
             # Pick the highest-confidence plate in this frame
             top = max(detections, key=lambda d: d["confidence"])
 
-            if top["confidence"] > best_conf:
+            if top["confidence"] > best_conf and top['confidence'] >= self.conf_threshold:
                 best_conf = top["confidence"]
                 best_frame = frame
                 best_bbox = top["bbox"]
